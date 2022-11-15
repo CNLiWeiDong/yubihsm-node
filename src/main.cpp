@@ -1,23 +1,25 @@
 /*
  * Adapted from: https://github.com/nodejs/node-addon-api/blob/master/doc/object_wrap.md
  */
-#include "main.hpp"
-#include "async.hpp"
-#include "taskqueue.hpp"
+#include "main.h"
 
-Napi::Object Session::Init(Napi::Env env, Napi::Object exports) {
+Napi::FunctionReference YubiHsm::constructor;
+
+Napi::Object YubiHsm::Init(Napi::Env env, Napi::Object exports) {
     // This method is used to hook the accessor and method callbacks
-    Napi::Function func = DefineClass(env, "Session", {
-        InstanceMethod("open", &Session::open),
-        InstanceMethod("close", &Session::close),
-        InstanceMethod("getPublicKey", &Session::getPublicKey),
-        InstanceMethod("getKeys", &Session::getKeys),
-        InstanceMethod("genKey", &Session::genKey),
-        InstanceMethod("addAuthKey", &Session::addAuthKey),
-        InstanceMethod("ecdh", &Session::ecdh),
-        InstanceMethod("ecdh2", &Session::ecdh2),
+    Napi::Function func = DefineClass(env, "YubiHsm", {
+        InstanceMethod("close", &YubiHsm::close),
+        InstanceMethod("connectDev", &YubiHsm::connect_dev),
+        InstanceMethod("openSession", &YubiHsm::open_session),
+        InstanceMethod("getPublicKey", &YubiHsm::get_public_key),
+        InstanceMethod("createAuthkey", &YubiHsm::create_authkey),
+        InstanceMethod("changeAuthkeyPwd", &YubiHsm::change_authkey_pwd),
+        InstanceMethod("deleteObject", &YubiHsm::delete_object),
+        InstanceMethod("genKey", &YubiHsm::gen_key),
+        InstanceMethod("signEcdsa", &YubiHsm::sign_ecdsa),
+        InstanceMethod("signEddsa", &YubiHsm::sign_eddsa)
     });
-
+    
     // Create a peristent reference to the class constructor. This will allow
     // a function called on a class prototype and a function
     // called on instance of a class to be distinguished from each other.
@@ -26,307 +28,393 @@ Napi::Object Session::Init(Napi::Env env, Napi::Object exports) {
     // to this destructor to reset the reference when the environment is no longer
     // available.
     constructor.SuppressDestruct();
-    exports.Set("Session", func);
+    exports.Set("YubiHsm", func);
     return exports;
 }
 
+
 /*
- * Constructor that will be called from Javascript with 'new Session()'
+ * Constructor that will be called from Javascript with 'new YubiHsm()'
  */
-Session::Session(const Napi::CallbackInfo &info) : Napi::ObjectWrap<Session>(info) {
+YubiHsm::YubiHsm(const Napi::CallbackInfo &info) : Napi::ObjectWrap<YubiHsm>(info) {
     const auto env = info.Env();
     yh_rc yrc{YHR_GENERIC_ERROR};
 
-    // ...
     auto config = info[0].As<Napi::Object>();
-    this->url = config.Get("url").As<Napi::String>().Utf8Value();
-    this->password = config.Get("password").As<Napi::String>().Utf8Value();
-    this->authkey = static_cast<uint16_t>(config.Get("authkey").As<Napi::Number>().Uint32Value());
+    _url = config.Get("url").As<Napi::String>().Utf8Value();
+    // authkey 的密码每次openSession时传入，内存中不保留
+    // _password = config.Get("password").As<Napi::String>().Utf8Value();
+    _authkey = static_cast<uint16_t>(config.Get("authkey").As<Napi::Number>().Uint32Value());
     
-    std::string domain = "1";
+    std::string domain = "all";
     if(config.Has("domain")) {
       domain = config.Get("domain").As<Napi::String>().Utf8Value();
     } 
-    yrc = yh_string_to_domains(domain.c_str(), &this->domain);
+    yrc = yh_string_to_domains(domain.c_str(), &_domain);
     if(yrc != YHR_SUCCESS) {
       THROW(env, "yh_string_to_domains failed: {}", yh_strerror(yrc)); 
     }
-    
-    this->queue = new TaskQueue();
 }
 
-Session::~Session(){
-  this->close_session();
-  delete this->queue;
+YubiHsm::~YubiHsm(){
+  close_connect();
 }
 
-Napi::FunctionReference Session::constructor;
-
-void Session::close_session() {
-  if(this->session) {
-    yh_util_close_session(this->session);
-    yh_destroy_session(&this->session);
-    this->session = nullptr;
+void YubiHsm::close_session() {
+  if(_session) {
+    yh_util_close_session(_session);
+    yh_destroy_session(&_session);
+    _session = nullptr;
   }
-    
-  if(this->connector) {
-    yh_disconnect(this->connector);
-    this->connector = nullptr;
+}
+
+void YubiHsm::close_connect() {
+  close_session();
+  if(_connector) {
+    yh_disconnect(_connector);
+    _connector = nullptr;
   }
   yh_exit();
 }
 
-Napi::Value Session::close(const Napi::CallbackInfo &info) {
-  auto env = info.Env();
-  return this->queue->add(env, [=]() -> MyReturnType {
-    this->close_session();
-    return "ok";
-  });
+// js: close()->bool
+Napi::Value YubiHsm::close(const Napi::CallbackInfo &info) {
+    close_connect();
+    const auto env = info.Env();
+    Napi::Boolean result = Napi::Boolean::New(env, true);
+    return result;
 }
 
-Napi::Value Session::open(const Napi::CallbackInfo &info) {
-  auto env = info.Env();
-  return this->queue->add(env, [=]() -> MyReturnType {
-    this->close_session();
+// js: connect_dev()->bool
+Napi::Value YubiHsm::connect_dev(const Napi::CallbackInfo &info) {
+    close_connect();
+    const auto env = info.Env();
     yh_rc yrc{YHR_GENERIC_ERROR};
-      
+
     yrc = yh_init();
     if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_init failed: {}", yh_strerror(yrc));
+      THROW(env, "yh_init failed: %s", yh_strerror(yrc));
     }
 
-    // printf("Trying to connect to: \"%s\"\n", this->url.c_str());
-    yrc = yh_init_connector(this->url.c_str(), &this->connector);
+    // printf("Trying to connect to: \"%s\"\n", _url.c_str());
+    yrc = yh_init_connector(_url.c_str(), &_connector);
     if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_init_connector failed: {}", yh_strerror(yrc));
+      THROW(env, "yh_init_connector failed: %s", yh_strerror(yrc));
     }
 
-    yrc = yh_connect(connector, 0);
+    yrc = yh_connect(_connector, 0);
     if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_connect failed: {}", yh_strerror(yrc));
+      THROW(env, "yh_connect failed: %s", yh_strerror(yrc));
     }
+    Napi::Boolean result = Napi::Boolean::New(env, true);
+    return result;
+}
 
-    yrc = yh_create_session_derived(connector, this->authkey, (const uint8_t *)this->password.c_str(),
-                                    this->password.size(), false, &this->session);
+// js: open_session(password)->number[session_id]
+Napi::Value YubiHsm::open_session(const Napi::CallbackInfo &info) {
+    if(!_connector) {
+      connect_dev(info);
+    }
+    close_session();
+    const auto env = info.Env();
+    yh_rc yrc{YHR_GENERIC_ERROR};
+    
+    if(info.Length() < 1){
+        THROW(env, "Wrong number of arguments %d", info.Length());
+    }
+    if(!info[0].IsString()){
+        THROW(env, "Wrong arguments type at %d", 0);
+    }
+    std::string password = info[0].As<Napi::String>().Utf8Value();
+
+    yrc = yh_create_session_derived(_connector, _authkey, (const uint8_t *)password.c_str(),
+                                    password.size(), false, &_session);
     if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_create_session_derived failed: {}", yh_strerror(yrc));
+      THROW(env, "yh_create_session_derived failed: %s", yh_strerror(yrc));
     }
 
-    yrc = yh_authenticate_session(this->session);
+    yrc = yh_authenticate_session(_session);
     if(yrc != YHR_SUCCESS) {
       printf("yh_authenticate_session failed\n");
-      THROW_ASYNC("yh_authenticate_session: {}", yh_strerror(yrc));
+      THROW(env, "yh_authenticate_session: %s", yh_strerror(yrc));
     }
     
     uint8_t session_id;
-    yrc = yh_get_session_id(this->session, &session_id);
+    yrc = yh_get_session_id(_session, &session_id);
     if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_get_session_id: {}", yh_strerror(yrc));
+      THROW(env, "yh_get_session_id: %s", yh_strerror(yrc));
     }
-    MyMap m{};
-    return m;
-  });
+    Napi::Number result = Napi::Number::New(env, session_id);
+    return result;
+}
+std::string YubiHsm::get_public_key(uint16_t key_id) {
+    yh_rc yrc = YHR_GENERIC_ERROR;
+    if(!_session) {
+      THROW_ASYNC("need open one session");
+    }
+    uint8_t key[65];
+    size_t public_key_len = sizeof(key);
+    yrc = yh_util_get_public_key(_session, key_id, key, &public_key_len, NULL);
+    
+    if(yrc != YHR_SUCCESS) {
+      THROW_ASYNC("Couldn't get public key");
+    }
+
+    std::string pk_string(std::begin(key), std::begin(key)+public_key_len);
+    return pk_string;
 }
 
-Napi::Value Session::getPublicKey(const Napi::CallbackInfo& info) {
+// js: get_public_key(key_id)->string[pk]
+Napi::Value YubiHsm::get_public_key(const Napi::CallbackInfo& info) {
   const auto env = info.Env();
+  if(!_session) {
+    THROW(env, "need open one session");
+  }
+  yh_rc yrc = YHR_GENERIC_ERROR;
+
   if (info.Length() < 1) {
-    NAPI_THROW(Napi::TypeError::New(env, "Wrong number of arguments"));
+    THROW(env, "Wrong number of arguments");
   }
   if (!info[0].IsNumber()) {
-    NAPI_THROW(Napi::TypeError::New(env, "Wrong arguments"));
+    THROW(env, "Wrong arguments");
   } 
   const auto key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
-  return this->queue->add(env, [=]() -> std::string {
-    const auto pk_string = get_public_key(this->session, key_id);
-    return pk_string;
-  });
+  std::string pk_string= get_public_key(key_id);
+  Napi::String reslut = Napi::String::New(env,pk_string);
+  return reslut;
 }
 
-Napi::Value Session::getKeys(const Napi::CallbackInfo& info) {
-  const auto env = info.Env();
-  return this->queue->add(env, [=]() -> MyMap {
-    MyMap m{};
+// js: create_authkey(key_label, password)->string[pk]
+Napi::Value YubiHsm::create_authkey(const Napi::CallbackInfo& info) {
+    const auto env = info.Env();
+    if(!_session) {
+      THROW(env, "need open one session");
+    }
     yh_rc yrc{YHR_GENERIC_ERROR};
     
-    // std::array<yh_object_descriptor, 64> objects;
-    size_t n_objects{64};
-    yh_object_descriptor objects[n_objects];
-    yh_capabilities capabilities;
-    yh_string_to_capabilities("derive-ecdh", &capabilities);
-    yrc = yh_util_list_objects(
-      this->session, 
-      0, // uint16_t id
-      YH_ASYMMETRIC_KEY, // yh_object_type type 
-      this->domain, // uint16_t domains
-      &capabilities, // const yh_capabilities *capabilities
-      YH_ALGO_EC_K256, //yh_algorithm algorithm 
-      nullptr, // const char *label
-      objects, 
-      &n_objects
-    );
-    if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_util_list_objects failed: {}", yh_strerror(yrc));
+    if(info.Length() < 2){
+        THROW(env, "Wrong number of arguments %d", info.Length());
     }
-    for(size_t i = 0; i < n_objects; ++i) {
-      const auto key_id = objects[i].id;
-      const auto pkey = get_public_key(this->session, key_id);
-      m.insert({pkey, key_id});
+    if(!info[0].IsString()){
+        THROW(env, "Wrong arguments type at %d", 0);
     }
-    return m;
-  });
-}
+    if(!info[1].IsString()){
+        THROW(env, "Wrong arguments type at %d", 1);
+    }
+    const auto key_label = info[0].As<Napi::String>().Utf8Value();
+    const auto password = info[1].As<Napi::String>().Utf8Value();
 
-Napi::Value Session::addAuthKey(const Napi::CallbackInfo& info) {
-  const auto env = info.Env();
-  const auto key_label = info[0].As<Napi::String>().Utf8Value();
-  const auto password = info[1].As<Napi::String>().Utf8Value();
-  return this->queue->add(env, [=]() -> MyMap {
-    MyMap m{};
-    yh_rc yrc = YHR_GENERIC_ERROR;
     yh_capabilities capabilities = {{0}};
-    yrc = yh_string_to_capabilities("derive-ecdh", &capabilities);
+    // delete-authentication-key 删除默认authkey
+    // change-authentication-key 可修改自己的密码
+    // sign-ecdsa , sign-eddsa 两种曲线签名算法都支持
+    // export-wrapped,import-wrapped 需要拥有导入导出的能力
+    // generate-asymmetric-key 可生成椭圆曲线keypair
+    yrc = yh_string_to_capabilities("delete-authentication-key,change-authentication-key,sign-ecdsa,sign-eddsa,export-wrapped,import-wrapped,generate-asymmetric-key", &capabilities);
     if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_string_to_capabilities failed: {}", yh_strerror(yrc));
+      THROW(env, "yh_string_to_capabilities failed: %s", yh_strerror(yrc));
     }
     uint16_t key_id = 0;
     yrc = yh_util_import_authentication_key_derived(
-      this->session, 
+      _session, 
       &key_id, 
       key_label.c_str(), 
-      this->domain,
+      _domain,
       &capabilities,
       &capabilities, 
       (const uint8_t *)password.c_str(), 
       password.size()
     );
     if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_util_import_authentication_key_derived failed: {}", yh_strerror(yrc));
+      THROW(env, "yh_util_import_authentication_key_derived failed: %s", yh_strerror(yrc));
     }
-    m.insert({"key_id", key_id});
-    return m;
-  });  
+    Napi::Number result = Napi::Number::New(env, key_id);
+    return result;
 }
 
-Napi::Value Session::genKey(const Napi::CallbackInfo& info) {
-  const auto env = info.Env();
-  // ...
-  const auto key_label = info[0].As<Napi::String>().Utf8Value();
-  
-  return this->queue->add(env, [=]() -> MyMap {
-    MyMap m{};
-    yh_rc yrc = YHR_GENERIC_ERROR;
-    yh_capabilities capabilities = {{0}};
-    yrc = yh_string_to_capabilities("derive-ecdh", &capabilities);
-    if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_string_to_capabilities failed: {}", yh_strerror(yrc));
+// js: change_authkey_pwd(key_id, new_password)->bool[true]
+Napi::Value YubiHsm::change_authkey_pwd(const Napi::CallbackInfo& info) {
+    const auto env = info.Env();
+    if(!_session) {
+      THROW(env, "need open one session");
     }
+    yh_rc yrc{YHR_GENERIC_ERROR};
+    
+    if(info.Length() < 2){
+        THROW(env, "Wrong number of arguments %d", info.Length());
+    }
+    if(!info[0].IsNumber()){
+        THROW(env, "Wrong arguments type at %d", 0);
+    }
+    if(!info[1].IsString()){
+        THROW(env, "Wrong arguments type at %d", 1);
+    }
+    uint16_t key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
+    const auto password = info[1].As<Napi::String>().Utf8Value();
+
+    yrc = yh_util_change_authentication_key_derived(
+      _session, 
+      &key_id, 
+      (const uint8_t *)password.c_str(), 
+      password.size()
+    );
+
+    if(yrc != YHR_SUCCESS) {
+      THROW(env, "yh_util_change_authentication_key_derived failed: %s", yh_strerror(yrc));
+    }
+    Napi::Boolean result = Napi::Boolean::New(env, true);
+    return result;
+}
+
+// js: delet_authkey(key_id, object_type)->bool[pk]
+Napi::Value YubiHsm::delete_object(const Napi::CallbackInfo& info) {
+    const auto env = info.Env();
+    if(!_session) {
+      THROW(env, "need open one session");
+    }
+    yh_rc yrc{YHR_GENERIC_ERROR};
+    
+    if(info.Length() < 2){
+        THROW(env, "Wrong number of arguments %d", info.Length());
+    }
+    if(!info[0].IsNumber()){
+        THROW(env, "Wrong arguments type at %d", 0);
+    }
+    if(!info[1].IsString()){
+        THROW(env, "Wrong arguments type at %d", 1);
+    }
+    uint16_t key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
+    const auto object_type = info[1].As<Napi::String>().Utf8Value();
+
+    yh_object_type type;
+    yh_string_to_type(object_type.c_str(), &type);
+    yrc = yh_util_delete_object(_session, key_id, type);
+
+    if(yrc != YHR_SUCCESS) {
+      THROW(env, "yh_util_delete_object failed: %s", yh_strerror(yrc));
+    }
+    Napi::Boolean result = Napi::Boolean::New(env, true);
+    return result;
+}
+
+
+// js: gen_key(key_label, key_type)->->object[key_id,public_key]
+// yh_string_to_algo()
+Napi::Value YubiHsm::gen_key(const Napi::CallbackInfo& info) {
+    const auto env = info.Env();
+    if(!_session) {
+      THROW(env, "need open one session");
+    }
+    yh_rc yrc{YHR_GENERIC_ERROR};
+
+    if(info.Length() < 2){
+        THROW(env, "Wrong number of arguments %d", info.Length());
+    }
+    if(!info[0].IsString()){
+        THROW(env, "Wrong arguments type at %d", 0);
+    }
+    if(!info[1].IsString()){
+        THROW(env, "Wrong arguments type at %d", 1);
+    }
+    const auto key_label = info[0].As<Napi::String>().Utf8Value();
+    const auto key_type = info[1].As<Napi::String>().Utf8Value();
+
+
+    yh_capabilities capabilities = {{0}};
+    // sign-ecdsa , sign-eddsa 两种曲线签名算法都支持
+    yrc = yh_string_to_capabilities("sign-ecdsa,sign-eddsa", &capabilities);
+    if(yrc != YHR_SUCCESS) {
+      THROW(env, "yh_string_to_capabilities failed: %s", yh_strerror(yrc));
+    }
+
+    yh_algorithm algorithm;
+    yrc = yh_string_to_algo(key_type.c_str(), &algorithm);
+    if(yrc != YHR_SUCCESS) {
+      THROW(env, "yh_string_to_algo failed: %s", yh_strerror(yrc));
+    }
+
 
     uint16_t key_id = 0;
-    yrc = yh_util_generate_ec_key(this->session, &key_id, key_label.c_str(), this->domain, &capabilities, YH_ALGO_EC_K256);
+    yrc = yh_util_generate_ec_key(_session, &key_id, key_label.c_str(), _domain, &capabilities, algorithm);
     if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_util_generate_ec_key failed: {}", yh_strerror(yrc));
+      THROW(env, "yh_util_generate_ec_key failed: %s", yh_strerror(yrc));
     }
     
-    const auto pkey = get_public_key(this->session, key_id);
-    m.insert({"key_id", key_id});
-    m.insert({"public_key", pkey});
-    return m;
-  });
-  
+    std::string pk_string= get_public_key(key_id);
+    Napi::Object result = Napi::Object::New(env);
+    result.Set(Napi::String::New(env,"public_key"),Napi::String::New(env, pk_string));
+    result.Set(Napi::String::New(env,"key_id"),Napi::Number::New(env,key_id));
+    return result;
 }
 
-Napi::Value Session::ecdh(const Napi::CallbackInfo& info) {
-  const auto env = info.Env();
-  const auto key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
-  const auto pubkey_str = info[1].As<Napi::String>().Utf8Value();
+// js: sign_ecdsa(key_id, in_data)->->string[signature]
+Napi::Value YubiHsm::sign_ecdsa(const Napi::CallbackInfo& info) {
+    const auto env = info.Env();
+    if(!_session) {
+      THROW(env, "need open one session");
+    }
+    yh_rc yrc{YHR_GENERIC_ERROR};
 
-  return this->queue->add(env, [=]() -> bytes {
-    bytes buffer{};
-    yh_rc yrc{YHR_GENERIC_ERROR};    
-    
-    const auto compressed_pk = abieos::string_to_public_key(pubkey_str);
-    uint8_t pubkey[65];
-    memset(pubkey, 0, sizeof(pubkey));
-    /* this will only fill the first 64 bytes of pubkey */
-    uECC_decompress(compressed_pk.data.data(), pubkey, uECC_secp256k1());
-    int valid = uECC_valid_public_key(pubkey, uECC_secp256k1());
-    if(!valid) {
-      THROW_ASYNC("This is not a valid secp256k1 key");
+    if(info.Length() < 2){
+        THROW(env, "Wrong number of arguments %d", info.Length());
     }
-    /* The last byte is our canary 
-     * uECC_decompress should never fill the buffer with more than 64 bytes. 
-     * Potential buffer overflow.
-     */
-    assert(pubkey[sizeof(pubkey)-1] == 0);
-    
-    /* 
-     * uECC public keys are missing the 0x04 prefix that 
-     * yh_util_derive_ecdh expects, so let's add it manually 
-     */
-     
-    /* move the first 64 bytes one byte to the right (end of public key  
-     * now aligns with end of buffer) */
-    memmove(pubkey + 1, pubkey, sizeof(pubkey) - 1);
-    /* The first byte of an uncompressed EC key should be 0x04 */
-    pubkey[0] = 0x04;
-      
-    /* The shared secret for curve secp256k1 is always 32 bytes */
-    size_t secret_len{32};
-    buffer.resize(secret_len);
-    
-    yrc = yh_util_derive_ecdh(
-      this->session, 
-      key_id, 
-      pubkey, 
-      sizeof(pubkey),
-      buffer.data(),
-      &secret_len
-    );
+    if(!info[0].IsString()){
+        THROW(env, "Wrong arguments type at %d", 0);
+    }
+    if(!info[1].IsString()){
+        THROW(env, "Wrong arguments type at %d", 1);
+    }
+    uint16_t key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
+    std::string in_data = info[1].As<Napi::String>().Utf8Value();
+
+    uint8_t out_data[65];
+    size_t out_data_len = sizeof(out_data);
+
+    yrc = yh_util_sign_ecdsa(_session, key_id, (const uint8_t *)in_data.c_str(), in_data.size(), out_data, &out_data_len);
     if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_util_derive_ecdh failed: {}", yh_strerror(yrc));
+      THROW(env, "yh_util_sign_ecdsa failed: %s", yh_strerror(yrc));
     }
-    assert(secret_len == buffer.size());
-    return buffer;
-  });
+    std::string signature(std::begin(out_data), std::begin(out_data)+out_data_len);
+    Napi::String result = Napi::String::New(env, signature);
+    return result;
 }
 
-/* Alternative implementation that works with uncompressed public keys */
-Napi::Value Session::ecdh2(const Napi::CallbackInfo& info) {
-  const auto env = info.Env();
-  const auto key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
-  const auto pubkey_napi = info[1].As<Napi::Buffer<uint8_t>>();
-  bytes pubkey{};
-  pubkey.resize(pubkey_napi.Length());
-  memcpy(pubkey.data(), pubkey_napi.Data(), pubkey.size());
 
-  return this->queue->add(env, [=]() -> bytes {
-    bytes buffer{};
-    yh_rc yrc{YHR_GENERIC_ERROR};    
-    
-    /* The shared secret for curve secp256k1 is always 32 bytes */
-    size_t secret_len{32};
-    buffer.resize(secret_len);
-    
-    yrc = yh_util_derive_ecdh(
-      this->session, 
-      key_id, 
-      pubkey.data(), 
-      pubkey.size(),
-      buffer.data(),
-      &secret_len
-    );
-    if(yrc != YHR_SUCCESS) {
-      THROW_ASYNC("yh_util_derive_ecdh failed: {}", yh_strerror(yrc));
+// js: sign_eddsa(key_id, in_data)->->string[signature]
+Napi::Value YubiHsm::sign_eddsa(const Napi::CallbackInfo& info) {
+    const auto env = info.Env();
+    if(!_session) {
+      THROW(env, "need open one session");
     }
-    assert(secret_len == buffer.size());
-    return buffer;
-  });
+    yh_rc yrc{YHR_GENERIC_ERROR};
+
+    if(info.Length() < 2){
+        THROW(env, "Wrong number of arguments %d", info.Length());
+    }
+    if(!info[0].IsString()){
+        THROW(env, "Wrong arguments type at %d", 0);
+    }
+    if(!info[1].IsString()){
+        THROW(env, "Wrong arguments type at %d", 1);
+    }
+    uint16_t key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
+    std::string in_data = info[1].As<Napi::String>().Utf8Value();
+
+    uint8_t out_data[65];
+    size_t out_data_len = sizeof(out_data);
+
+    yrc = yh_util_sign_eddsa(_session, key_id, (const uint8_t *)in_data.c_str(), in_data.size(), out_data, &out_data_len);
+    if(yrc != YHR_SUCCESS) {
+      THROW(env, "yh_util_sign_eddsa failed: %s", yh_strerror(yrc));
+    }
+    std::string signature(std::begin(out_data), std::begin(out_data)+out_data_len);
+    Napi::String result = Napi::String::New(env, signature);
+    return result;
 }
 
 // Initialize native add-on
 Napi::Object Init (Napi::Env env, Napi::Object exports) {
-    Session::Init(env, exports);
+    YubiHsm::Init(env, exports);
     return exports;
 }
 

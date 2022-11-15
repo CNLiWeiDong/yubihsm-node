@@ -1,18 +1,14 @@
 {
   "targets": [
     {
-      "target_name": "addon",
+      "target_name": "yubihsm",
       "sources": [ 
-        "lib/fmt/src/format.cc",
-        "lib/micro-ecc/uECC.c",
-        "src/helpers.cpp",
         "src/main.cpp",
       ],
       "include_dirs": [
         "<(module_root_dir)/yubihsm2-sdk/include",
         "<!@(node -p \"require('node-addon-api').include\")",
-        "<(module_root_dir)/lib/fmt/include",
-        "<(module_root_dir)/lib",
+        "src",
       ],
       "link_settings": {
         "libraries": [
@@ -24,8 +20,8 @@
       },
       'dependencies': [
         "<!(node -p \"require('node-addon-api').gyp\")",
-        "fetch_sdk",
-        ],
+        # "fetch_sdk",
+      ],
       'cflags!': [ '-fno-exceptions' ],
       'cflags_cc!': [ '-fno-exceptions' ],
       'cflags_cc': [
@@ -48,21 +44,11 @@
             'cflags+': ['-fvisibility=hidden'],
             'xcode_settings': {
               'GCC_SYMBOLS_PRIVATE_EXTERN': 'YES', # -fvisibility=hidden
-            }
+            },
+            # amd还是arm重新设置 link_settings中的library_dirs
           }
         ],
       ],
     },
-    {
-      "target_name": "fetch_sdk",
-      "actions": [{
-          "action_name": "fetch_sdk",
-          "inputs": [],
-          "outputs": ['<(module_root_dir)/yubihsm2-sdk'],
-          "action": [
-              "./fetch_sdk.sh"
-          ]
-      }]
-    }
-  ]
+  ],
 }

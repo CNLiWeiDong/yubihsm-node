@@ -1,2 +1,2 @@
-var addon = require('bindings')('addon.node')
-module.exports = addon.Session
+const yubihsm = require('bindings')('yubihsm.node');
+module.exports = yubihsm.YubiHsm;
