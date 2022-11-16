@@ -83,12 +83,12 @@ async function genKey() {
   r = hsm.genKey('secp256k1', 'eck256');
   console.log("genKey", r);
 
-  // r = hsm.genKey('secp256k1', 'ecp256');
+  // r = hsm.genKey('secp256r1', 'ecp256');
   // console.log("genKey", r);
 }
-genKey()
+// genKey()
 
-async function signEcdsa() {
+async function genKey1() {
   const config = {
     url: usb_connection,
     domain: 'all',
@@ -100,13 +100,51 @@ async function signEcdsa() {
   r = hsm.openSession('bb123456');
   console.log("openSession", r);
 
-  r = hsm.signEcdsa('secp256k1', 'eck256');
-  console.log("signEcdsa", r);
-
-  // r = hsm.signEcdsa('secp256k1', 'ecp256');
-  // console.log("signEcdsa", r);
+  r = hsm.genKey('secp256r1', 'ecp256');
+  console.log("genKey", r);
 }
-// signEcdsa()
+// genKey1()
+
+//  *<tt>in_len</tt> is not 20, 28, 34, 48, 64 or 66. See #yh_rc for other possible
+// 签名数据的长度必须是。。
+async function signEcdsa() {
+  const config = {
+    url: usb_connection,
+    domain: 'all',
+    authkey: 14988,
+  }
+  const hsm = new YubiHsm(config)
+  let r =  hsm.connectDev();
+  console.log("connectDev", r);
+  r = hsm.openSession('bb123456');
+  console.log("openSession", r);
+  const data = Buffer.from('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'utf-8').toString('hex');
+  console.log(data);
+  r = hsm.signEcdsa(23830, data);
+  console.log("signEcdsa", r);
+}
+signEcdsa()
+
+
+async function signEcdsa1() {
+  const config = {
+    url: usb_connection,
+    domain: 'all',
+    authkey: 14988,
+  }
+  const hsm = new YubiHsm(config)
+  let r =  hsm.connectDev();
+  console.log("connectDev", r);
+  r = hsm.openSession('bb123456');
+  console.log("openSession", r);
+  const data = Buffer.from('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'utf-8').toString('hex');
+  console.log(data);
+  // public_key: '8a891ad210569f0ac5621c62fd26cc1cbc4c909f9c76a4be7035332cbc01831a18393a8edfda28c58d7b366de4c1617f6c612c14c761065fb93adf8218acb820',
+  r = hsm.signEcdsa(37852, data);
+  console.log("signEcdsa", r);
+}
+// signEcdsa1()
+
 
 /* 
  * Test if destructor is getting called

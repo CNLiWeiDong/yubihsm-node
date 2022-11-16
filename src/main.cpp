@@ -161,7 +161,7 @@ std::string YubiHsm::get_public_key(uint16_t key_id) {
     }
 
     std::string pk_string(std::begin(key), std::begin(key)+public_key_len);
-    return pk_string;
+    return string_to_hex(pk_string);
 }
 
 // js: get_public_key(key_id)->string[pk]
@@ -358,7 +358,7 @@ Napi::Value YubiHsm::sign_ecdsa(const Napi::CallbackInfo& info) {
     if(info.Length() < 2){
         THROW(env, "Wrong number of arguments %d", info.Length());
     }
-    if(!info[0].IsString()){
+    if(!info[0].IsNumber()){
         THROW(env, "Wrong arguments type at %d", 0);
     }
     if(!info[1].IsString()){
@@ -366,16 +366,20 @@ Napi::Value YubiHsm::sign_ecdsa(const Napi::CallbackInfo& info) {
     }
     uint16_t key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
     std::string in_data = info[1].As<Napi::String>().Utf8Value();
-
-    uint8_t out_data[65];
+    std::cout<<key_id<<std::endl;
+    std::cout<<in_data<<"||"<<in_data.size()<<std::endl;
+    in_data = hex_to_str(in_data);
+    std::cout<<in_data<<"||"<<in_data.size()<<std::endl;
+    uint8_t out_data[100];
     size_t out_data_len = sizeof(out_data);
+    yrc = yh_util_sign_ecdsa(_session, key_id, (const uint8_t *)in_data.c_str(), (size_t)in_data.size(), (uint8_t *)out_data, &out_data_len);
 
-    yrc = yh_util_sign_ecdsa(_session, key_id, (const uint8_t *)in_data.c_str(), in_data.size(), out_data, &out_data_len);
     if(yrc != YHR_SUCCESS) {
       THROW(env, "yh_util_sign_ecdsa failed: %s", yh_strerror(yrc));
     }
-    std::string signature(std::begin(out_data), std::begin(out_data)+out_data_len);
-    Napi::String result = Napi::String::New(env, signature);
+    std::cout<<"yh_util_sign_ecdsa-"<<out_data_len<<std::endl;
+    std::string signature(reinterpret_cast<char const*>(out_data), out_data_len);
+    Napi::String result = Napi::String::New(env, string_to_hex(signature));
     return result;
 }
 
@@ -403,12 +407,13 @@ Napi::Value YubiHsm::sign_eddsa(const Napi::CallbackInfo& info) {
     uint8_t out_data[65];
     size_t out_data_len = sizeof(out_data);
 
-    yrc = yh_util_sign_eddsa(_session, key_id, (const uint8_t *)in_data.c_str(), in_data.size(), out_data, &out_data_len);
+    yrc = yh_util_sign_eddsa(_session, key_id, (const uint8_t *)in_data.c_str(), (size_t)in_data.size(), (uint8_t *)out_data, &out_data_len);
+
     if(yrc != YHR_SUCCESS) {
       THROW(env, "yh_util_sign_eddsa failed: %s", yh_strerror(yrc));
     }
-    std::string signature(std::begin(out_data), std::begin(out_data)+out_data_len);
-    Napi::String result = Napi::String::New(env, signature);
+    std::string signature(reinterpret_cast<char const*>(out_data), out_data_len);
+    Napi::String result = Napi::String::New(env, string_to_hex(signature));
     return result;
 }
 

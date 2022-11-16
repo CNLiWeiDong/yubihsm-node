@@ -1,3 +1,6 @@
+
+#include <iostream>
+#include <sstream>
 #include <napi.h>
 #include <yubihsm.h>
 
@@ -10,7 +13,9 @@
 do {                                                                         \
     char str[log_max_length];                                                \
     sprintf(str, "%s" fmt, "", ##__VA_ARGS__);                               \
+    std::cerr<<str<<std::endl;                                               \
     Napi::Error::New(env, str).ThrowAsJavaScriptException();                 \
+    throw std::runtime_error(str);                                           \
 } while (0)
 
 
@@ -21,6 +26,29 @@ do {                                                                         \
     throw std::runtime_error(str);                                           \
 } while (0)
 
+
+std::string string_to_hex(const std::string& data)
+{
+    const std::string hex = "0123456789abcdef";
+    std::stringstream ss;
+
+    for (std::string::size_type i = 0; i < data.size(); ++i)
+        ss << hex[(unsigned char)data[i] >> 4] << hex[(unsigned char)data[i] & 0xf];
+    std::cout << ss.str() << std::endl;
+    return ss.str();
+}
+
+std::string hex_to_str(const std::string& str)
+{
+    std::string result;
+    for (size_t i = 0; i < str.length(); i += 2)
+    {
+        std::string byte = str.substr(i, 2);
+        char chr = (char)(int)strtol(byte.c_str(), NULL, 16);
+        result.push_back(chr);
+    }
+    return result;
+}
 
 
 class YubiHsm : public Napi::ObjectWrap<YubiHsm> {
