@@ -80,4 +80,6 @@ class YubiHsm : public Napi::ObjectWrap<YubiHsm> {
     Napi::Value gen_key(const Napi::CallbackInfo& info);
     Napi::Value sign_ecdsa(const Napi::CallbackInfo& info);
     Napi::Value sign_eddsa(const Napi::CallbackInfo& info);
+    Napi::Value get_opaque(const Napi::CallbackInfo& info);
+    Napi::Value import_opaque(const Napi::CallbackInfo& info);
 };

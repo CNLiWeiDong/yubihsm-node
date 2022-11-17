@@ -17,7 +17,9 @@ Napi::Object YubiHsm::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("deleteObject", &YubiHsm::delete_object),
         InstanceMethod("genKey", &YubiHsm::gen_key),
         InstanceMethod("signEcdsa", &YubiHsm::sign_ecdsa),
-        InstanceMethod("signEddsa", &YubiHsm::sign_eddsa)
+        InstanceMethod("signEddsa", &YubiHsm::sign_eddsa),
+        InstanceMethod("getOpaque", &YubiHsm::get_opaque),
+        InstanceMethod("importOpaque", &YubiHsm::import_opaque)
     });
     
     // Create a peristent reference to the class constructor. This will allow
@@ -147,6 +149,7 @@ Napi::Value YubiHsm::open_session(const Napi::CallbackInfo &info) {
     Napi::Number result = Napi::Number::New(env, session_id);
     return result;
 }
+
 std::string YubiHsm::get_public_key(uint16_t key_id) {
     yh_rc yrc = YHR_GENERIC_ERROR;
     if(!_session) {
@@ -179,6 +182,7 @@ Napi::Value YubiHsm::get_public_key(const Napi::CallbackInfo& info) {
     THROW(env, "Wrong arguments");
   } 
   const auto key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
+  
   std::string pk_string= get_public_key(key_id);
   Napi::String reslut = Napi::String::New(env,pk_string);
   return reslut;
@@ -210,7 +214,8 @@ Napi::Value YubiHsm::create_authkey(const Napi::CallbackInfo& info) {
     // sign-ecdsa , sign-eddsa 两种曲线签名算法都支持
     // export-wrapped,import-wrapped 需要拥有导入导出的能力
     // generate-asymmetric-key 可生成椭圆曲线keypair
-    yrc = yh_string_to_capabilities("delete-authentication-key,change-authentication-key,sign-ecdsa,sign-eddsa,export-wrapped,import-wrapped,generate-asymmetric-key", &capabilities);
+    // put-opaque,put-opaque,delete-opaque opaque对象的操作权限，用于自定义开发
+    yrc = yh_string_to_capabilities("put-opaque,put-opaque,delete-opaque,delete-authentication-key,change-authentication-key,sign-ecdsa,sign-eddsa,export-wrapped,import-wrapped,generate-asymmetric-key", &capabilities);
     if(yrc != YHR_SUCCESS) {
       THROW(env, "yh_string_to_capabilities failed: %s", yh_strerror(yrc));
     }
@@ -297,7 +302,78 @@ Napi::Value YubiHsm::delete_object(const Napi::CallbackInfo& info) {
     return result;
 }
 
+Napi::Value YubiHsm::import_opaque(const Napi::CallbackInfo& info) {
+    const auto env = info.Env();
+    if(!_session) {
+      THROW(env, "need open one session");
+    }
+    yh_rc yrc{YHR_GENERIC_ERROR};
 
+    if(info.Length() < 3){
+        THROW(env, "Wrong number of arguments %d", info.Length());
+    }
+    if(!info[0].IsString()){
+        THROW(env, "Wrong arguments type at %d", 0);
+    }
+    if(!info[1].IsString()){
+        THROW(env, "Wrong arguments type at %d", 1);
+    }
+    if(!info[2].IsString()){
+        THROW(env, "Wrong arguments type at %d", 2);
+    }
+
+    const auto key_label = info[0].As<Napi::String>().Utf8Value();
+    const auto key_type = info[1].As<Napi::String>().Utf8Value();
+    std::string in_data = info[2].As<Napi::String>().Utf8Value();
+    in_data = hex_to_str(in_data);
+
+    yh_algorithm algorithm;
+    yrc = yh_string_to_algo(key_type.c_str(), &algorithm);
+    if(yrc != YHR_SUCCESS) {
+      THROW(env, "yh_string_to_algo failed: %s", yh_strerror(yrc));
+    }
+    uint16_t key_id = 0;
+    yh_capabilities capabilities = {{0}};
+    // put-opaque,put-opaque,delete-opaque opaque对象的操作权限，用于自定义开发
+    yrc = yh_string_to_capabilities("put-opaque,put-opaque,delete-opaque", &capabilities);
+    if(yrc != YHR_SUCCESS) {
+      THROW(env, "yh_string_to_capabilities failed: %s", yh_strerror(yrc));
+    }
+
+    yrc = yh_util_import_opaque(_session, &key_id, key_label.c_str(), _domain, &capabilities, algorithm, (const uint8_t *)in_data.c_str(), (size_t)in_data.size());
+    if(yrc != YHR_SUCCESS) {
+      THROW(env, "yh_util_import_opaque failed: %s", yh_strerror(yrc));
+    }
+    Napi::Number result = Napi::Number::New(env, key_id);
+    return result;
+}
+
+Napi::Value YubiHsm::get_opaque(const Napi::CallbackInfo& info) {
+    const auto env = info.Env();
+    if(!_session) {
+      THROW(env, "need open one session");
+    }
+    yh_rc yrc{YHR_GENERIC_ERROR};
+
+    if(info.Length() < 1){
+        THROW(env, "Wrong number of arguments %d", info.Length());
+    }
+    if(!info[0].IsNumber()){
+        THROW(env, "Wrong arguments type at %d", 0);
+    }
+    uint16_t key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
+    uint8_t out_data[100];
+    size_t out_data_len = sizeof(out_data);
+
+    yrc = yh_util_get_opaque(_session, key_id,  (uint8_t *)out_data, &out_data_len);
+    if(yrc != YHR_SUCCESS) {
+      THROW(env, "yh_util_get_opaque failed: %s", yh_strerror(yrc));
+    }
+    std::string key(reinterpret_cast<char const*>(out_data), out_data_len);
+    Napi::String result = Napi::String::New(env, string_to_hex(key));
+    return result;
+
+}
 // js: gen_key(key_label, key_type)->->object[key_id,public_key]
 // yh_string_to_algo()
 Napi::Value YubiHsm::gen_key(const Napi::CallbackInfo& info) {
@@ -366,10 +442,7 @@ Napi::Value YubiHsm::sign_ecdsa(const Napi::CallbackInfo& info) {
     }
     uint16_t key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
     std::string in_data = info[1].As<Napi::String>().Utf8Value();
-    std::cout<<key_id<<std::endl;
-    std::cout<<in_data<<"||"<<in_data.size()<<std::endl;
     in_data = hex_to_str(in_data);
-    std::cout<<in_data<<"||"<<in_data.size()<<std::endl;
     uint8_t out_data[100];
     size_t out_data_len = sizeof(out_data);
     yrc = yh_util_sign_ecdsa(_session, key_id, (const uint8_t *)in_data.c_str(), (size_t)in_data.size(), (uint8_t *)out_data, &out_data_len);
@@ -377,7 +450,6 @@ Napi::Value YubiHsm::sign_ecdsa(const Napi::CallbackInfo& info) {
     if(yrc != YHR_SUCCESS) {
       THROW(env, "yh_util_sign_ecdsa failed: %s", yh_strerror(yrc));
     }
-    std::cout<<"yh_util_sign_ecdsa-"<<out_data_len<<std::endl;
     std::string signature(reinterpret_cast<char const*>(out_data), out_data_len);
     Napi::String result = Napi::String::New(env, string_to_hex(signature));
     return result;
@@ -403,8 +475,9 @@ Napi::Value YubiHsm::sign_eddsa(const Napi::CallbackInfo& info) {
     }
     uint16_t key_id = static_cast<uint16_t>(info[0].As<Napi::Number>().Uint32Value());
     std::string in_data = info[1].As<Napi::String>().Utf8Value();
-
-    uint8_t out_data[65];
+    in_data = hex_to_str(in_data);
+    
+    uint8_t out_data[100];
     size_t out_data_len = sizeof(out_data);
 
     yrc = yh_util_sign_eddsa(_session, key_id, (const uint8_t *)in_data.c_str(), (size_t)in_data.size(), (uint8_t *)out_data, &out_data_len);

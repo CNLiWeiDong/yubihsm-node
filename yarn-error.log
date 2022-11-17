@@ -1,0 +1,47 @@
+Arguments: 
+  /Users/liweidong/.nvm/versions/node/v18.12.0/bin/node /usr/local/Cellar/yarn/1.15.2/libexec/bin/yarn.js add js-sha3
+
+PATH: 
+  /Users/liweidong/.nvm/versions/node/v18.12.0/bin:/Library/Frameworks/Python.framework/Versions/2.7/bin:/Library/Frameworks/Python.framework/Versions/3.10/bin:/usr/local/opt/openssl@1.1/bin:/Library/Java/JavaVirtualMachines/jdk1.8.0_291.jdk/Contents/Home/bin:/Users/liweidong/arcanist/arcanist/bin/:/Users/liweidong/work/btc/bitcoin-0.17.0/bin:/Users/liweidong/go/bin:/Volumes/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/go/bin:/usr/local/MacGPG2/bin:/Users/liweidong/Documents/java/apache-maven-3.8.1/bin:/Applications/Visual\ Studio\ Code.app/Contents/Resources/app/bin:/usr/local/go/bin
+
+Yarn version: 
+  1.15.2
+
+Node version: 
+  18.12.0
+
+Platform: 
+  darwin x64
+
+Trace: 
+  Error: http://10.108.5.231:4873/bindings: ETIMEDOUT
+      at Timeout._onTimeout (/usr/local/Cellar/yarn/1.15.2/libexec/lib/cli.js:130201:19)
+      at listOnTimeout (node:internal/timers:564:17)
+      at process.processTimers (node:internal/timers:507:7)
+
+npm manifest: 
+  {
+    "name": "yubihsm-node",
+    "version": "1.0.0",
+    "main": "index.js",
+    "license": "MIT",
+    "scripts": {
+      "test": "jest"
+    },
+    "dependencies": {
+      "bindings": "1.5.0",
+      "node-addon-api": "5.0.0"
+    },
+    "devDependencies": {
+      "ethereumjs-common": "1.4.0",
+      "ethereumjs-tx": "^2.1.2",
+      "ethereumjs-util": "^6.2.0",
+      "js-sha3": "^0.8.0"
+    }
+  }
+
+yarn manifest: 
+  No manifest
+
+Lockfile: 
+  No lockfile
